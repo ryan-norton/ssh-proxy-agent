@@ -1,240 +1,240 @@
 package sshProxyAgent
 
 import (
-  "errors"
-  "io/ioutil"
-  "log"
-  "net"
-  "os"
-  "path/filepath"
+	"errors"
+	"io/ioutil"
+	"log"
+	"net"
+	"os"
+	"path/filepath"
 
-  "golang.org/x/crypto/ssh"
-  "golang.org/x/crypto/ssh/agent"
+	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
 )
 
 type ProxyKeyring struct {
-  keyring  agent.ExtendedAgent
-  upstream agent.ExtendedAgent
+	keyring  agent.ExtendedAgent
+	upstream agent.ExtendedAgent
 
-  listener net.Listener
+	listener net.Listener
 }
 
 func NewProxyKeyring(upstreamAuthSock string, vaultSigningUrl string, username string) (*ProxyKeyring, error) {
-  var err error
-  var conn net.Conn
-  var upstream agent.ExtendedAgent
+	var err error
+	var conn net.Conn
+	var upstream agent.ExtendedAgent
 
-  if upstreamAuthSock != "" {
-    conn, err = net.Dial("unix", upstreamAuthSock)
-    if err != nil {
-      return nil, err
-    }
+	if upstreamAuthSock != "" {
+		conn, err = net.Dial("unix", upstreamAuthSock)
+		if err != nil {
+			return nil, err
+		}
 
-    upstream = agent.NewClient(conn)
-  }
+		upstream = agent.NewClient(conn)
+	}
 
-  if vaultSigningUrl != "" {
-    signingKeyring, err := NewSigningKeyring(vaultSigningUrl, username)
-    if err != nil {
-      return nil, err
-    }
+	if vaultSigningUrl != "" {
+		signingKeyring, err := NewSigningKeyring(vaultSigningUrl, username)
+		if err != nil {
+			return nil, err
+		}
 
-    return &ProxyKeyring{
-      upstream: upstream,
-      keyring:  signingKeyring,
-    }, nil
-  } else {
-    return &ProxyKeyring{
-      upstream: upstream,
-      keyring:  agent.NewKeyring().(agent.ExtendedAgent),
-    }, nil
-  }
+		return &ProxyKeyring{
+			upstream: upstream,
+			keyring:  signingKeyring,
+		}, nil
+	} else {
+		return &ProxyKeyring{
+			upstream: upstream,
+			keyring:  agent.NewKeyring().(agent.ExtendedAgent),
+		}, nil
+	}
 }
 
 func (pk *ProxyKeyring) Listen() (string, error) {
-  if pk.listener != nil {
-    return "", errors.New("Already listening")
-  }
+	if pk.listener != nil {
+		return "", errors.New("Already listening")
+	}
 
-  dir, err := ioutil.TempDir("", "proxykeyring")
-  if err != nil {
-    return "", err
-  }
+	dir, err := ioutil.TempDir("", "proxykeyring")
+	if err != nil {
+		return "", err
+	}
 
-  err = os.Chmod(dir, 0700)
-  if err != nil {
-    return "", err
-  }
+	err = os.Chmod(dir, 0700)
+	if err != nil {
+		return "", err
+	}
 
-  listener := filepath.Join(dir, "listener")
-  pk.listener, err = net.Listen("unix", listener)
-  if err != nil {
-    return "", err
-  }
+	listener := filepath.Join(dir, "listener")
+	pk.listener, err = net.Listen("unix", listener)
+	if err != nil {
+		return "", err
+	}
 
-  err = os.Chmod(listener, 0600)
-  if err != nil {
-    return "", err
-  }
+	err = os.Chmod(listener, 0600)
+	if err != nil {
+		return "", err
+	}
 
-  return listener, nil
+	return listener, nil
 }
 
 func (pk *ProxyKeyring) Serve() error {
-  if pk.listener == nil {
-    return errors.New("Not listening")
-  }
+	if pk.listener == nil {
+		return errors.New("Not listening")
+	}
 
-  for {
-    c, err := pk.listener.Accept()
-    if err != nil {
-      return err
-    }
+	for {
+		c, err := pk.listener.Accept()
+		if err != nil {
+			return err
+		}
 
-    go agent.ServeAgent(pk, c)
-  }
+		go agent.ServeAgent(pk, c)
+	}
 }
 
 func (pk *ProxyKeyring) Close() error {
-  // call Close() on the keyring if it exists
-  closer, ok := pk.keyring.(interface {
-    Close()
-  })
-  if ok {
-    closer.Close()
-  }
+	// call Close() on the keyring if it exists
+	closer, ok := pk.keyring.(interface {
+		Close()
+	})
+	if ok {
+		closer.Close()
+	}
 
-  if pk.listener != nil {
-    return pk.listener.Close()
-  }
+	if pk.listener != nil {
+		return pk.listener.Close()
+	}
 
-  return nil
+	return nil
 }
 
 func (pk *ProxyKeyring) List() ([]*agent.Key, error) {
-  keys, err := pk.keyring.List()
-  if err != nil {
-    return nil, err
-  }
+	keys, err := pk.keyring.List()
+	if err != nil {
+		return nil, err
+	}
 
-  if pk.upstream != nil {
-    ukeys, err := pk.upstream.List()
-    if err != nil {
-      log.Printf("[ProxyKeyring] Upstream list error: %v", err)
-    } else {
-      keys = append(keys, ukeys...)
-    }
-  }
+	if pk.upstream != nil {
+		ukeys, err := pk.upstream.List()
+		if err != nil {
+			log.Printf("[ProxyKeyring] Upstream list error: %v", err)
+		} else {
+			keys = append(keys, ukeys...)
+		}
+	}
 
-  return keys, nil
+	return keys, nil
 }
 
 func (pk *ProxyKeyring) Sign(key ssh.PublicKey, data []byte) (*ssh.Signature, error) {
-  sig, err := pk.keyring.Sign(key, data)
-  if err == nil {
-    return sig, nil
-  }
+	sig, err := pk.keyring.Sign(key, data)
+	if err == nil {
+		return sig, nil
+	}
 
-  if pk.upstream != nil {
-    usig, uerr := pk.upstream.Sign(key, data)
-    if uerr == nil {
-      return usig, nil
-    }
-  }
+	if pk.upstream != nil {
+		usig, uerr := pk.upstream.Sign(key, data)
+		if uerr == nil {
+			return usig, nil
+		}
+	}
 
-  return nil, err
+	return nil, err
 }
 
 func (pk *ProxyKeyring) SignWithFlags(key ssh.PublicKey, data []byte, flags agent.SignatureFlags) (*ssh.Signature, error) {
-  sig, err := pk.keyring.SignWithFlags(key, data, flags)
-  if err == nil {
-    return sig, nil
-  }
+	sig, err := pk.keyring.SignWithFlags(key, data, flags)
+	if err == nil {
+		return sig, nil
+	}
 
-  if pk.upstream != nil {
-    usig, uerr := pk.upstream.SignWithFlags(key, data, flags)
-    if uerr == nil {
-      return usig, nil
-    }
-  }
+	if pk.upstream != nil {
+		usig, uerr := pk.upstream.SignWithFlags(key, data, flags)
+		if uerr == nil {
+			return usig, nil
+		}
+	}
 
-  return nil, err
+	return nil, err
 }
 
 func (pk *ProxyKeyring) Add(key agent.AddedKey) error {
-  return pk.keyring.Add(key)
+	return pk.keyring.Add(key)
 }
 
 func (pk *ProxyKeyring) Remove(key ssh.PublicKey) error {
-  err := pk.keyring.Remove(key)
+	err := pk.keyring.Remove(key)
 
-  if pk.upstream != nil {
-    uerr := pk.upstream.Remove(key)
-    if uerr == nil {
-      err = nil
-    }
-  }
+	if pk.upstream != nil {
+		uerr := pk.upstream.Remove(key)
+		if uerr == nil {
+			err = nil
+		}
+	}
 
-  return err
+	return err
 }
 
 func (pk *ProxyKeyring) RemoveAll() error {
-  err := pk.keyring.RemoveAll()
+	err := pk.keyring.RemoveAll()
 
-  if pk.upstream != nil {
-    uerr := pk.upstream.RemoveAll()
-    if err == nil {
-      err = uerr
-    }
-  }
+	if pk.upstream != nil {
+		uerr := pk.upstream.RemoveAll()
+		if err == nil {
+			err = uerr
+		}
+	}
 
-  return err
+	return err
 }
 
 func (pk *ProxyKeyring) Lock(passphrase []byte) error {
-  err := pk.keyring.Lock(passphrase)
+	err := pk.keyring.Lock(passphrase)
 
-  if pk.upstream != nil {
-    uerr := pk.upstream.Lock(passphrase)
-    if err == nil {
-      err = uerr
-    }
-  }
+	if pk.upstream != nil {
+		uerr := pk.upstream.Lock(passphrase)
+		if err == nil {
+			err = uerr
+		}
+	}
 
-  return err
+	return err
 }
 
 func (pk *ProxyKeyring) Unlock(passphrase []byte) error {
-  err := pk.keyring.Unlock(passphrase)
+	err := pk.keyring.Unlock(passphrase)
 
-  if pk.upstream != nil {
-    uerr := pk.upstream.Unlock(passphrase)
-    if err == nil {
-      err = uerr
-    }
-  }
+	if pk.upstream != nil {
+		uerr := pk.upstream.Unlock(passphrase)
+		if err == nil {
+			err = uerr
+		}
+	}
 
-  return err
+	return err
 }
 
 func (pk *ProxyKeyring) Signers() ([]ssh.Signer, error) {
-  signers, err := pk.keyring.Signers()
-  if err != nil {
-    return nil, err
-  }
+	signers, err := pk.keyring.Signers()
+	if err != nil {
+		return nil, err
+	}
 
-  if pk.upstream != nil {
-    usigners, err := pk.upstream.Signers()
-    if err != nil {
-      log.Printf("[ProxyKeyring] Upstream signers error: %v", err)
-    } else {
-      signers = append(signers, usigners...)
-    }
-  }
+	if pk.upstream != nil {
+		usigners, err := pk.upstream.Signers()
+		if err != nil {
+			log.Printf("[ProxyKeyring] Upstream signers error: %v", err)
+		} else {
+			signers = append(signers, usigners...)
+		}
+	}
 
-  return signers, nil
+	return signers, nil
 }
 
 func (pk *ProxyKeyring) Extension(extensionType string, contents []byte) ([]byte, error) {
-  return nil, agent.ErrExtensionUnsupported
+	return nil, agent.ErrExtensionUnsupported
 }
